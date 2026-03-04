@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebLLM Detective - 究極のAI数式探偵</title>
+    <style>
+        :root { --bg: #020617; --card: #1e293b; --primary: #38bdf8; --accent: #f43f5e; --text: #f1f5f9; }
+        body { font-family: sans-serif; background: var(--bg); color: var(--text); display: flex; flex-direction: column; align-items: center; padding: 20px; margin: 0; }
+        .container { width: 100%; max-width: 600px; text-align: center; }
+        
+        /* ローディング画面 */
+        #loader { background: var(--card); padding: 20px; border-radius: 12px; margin: 20px 0; border: 1px solid var(--primary); }
+        .progress-bar { width: 100%; height: 10px; background: #0f172a; border-radius: 5px; margin-top: 10px; overflow: hidden; }
+        #progress-fill { width: 0%; height: 100%; background: var(--primary); transition: width 0.3s; }
+
+        .grid { display: grid; grid-template-columns: repeat(10, 1fr); gap: 5px; margin: 20px 0; }
+        .tile { aspect-ratio: 1; display: flex; align-items: center; justify-content: center; background: var(--card); border-radius: 4px; font-size: 0.8rem; transition: 0.5s; border: 1px solid #334155; }
+        .tile.excluded { opacity: 0.05; transform: scale(0.7); filter: blur(1px); }
+
+        .input-area { display: flex; gap: 10px; margin-bottom: 20px; }
+        input { flex: 1; padding: 12px; border-radius: 8px; border: none; background: #1e293b; color: white; border: 1px solid #475569; }
+        button { padding: 10px 20px; background: var(--primary); border: none; border-radius: 8px; font-weight: bold; cursor: pointer; color: #020617; }
+        button:disabled { background: #475569; cursor: wait; }
+
+        #log { text-align: left; background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; max-height: 150px; overflow-y: auto; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🕵️‍♂️ WebLLM 数式探偵</h1>
+
+    <div id="loader">
+        <div id="status-msg">AIの脳を準備中... (初回は1〜2分かかります)</div>
+        <div class="progress-bar"><div id="progress-fill"></div></div>
+        <small style="display:block; margin-top:10px; color:#94a3b8;">※Wi-Fi環境を推奨します。2回目以降は一瞬で終わります。</small>
+    </div>
+
+    <div id="game-ui" style="display: none;">
+        <div id="target-hint" style="color:var(--primary); font-weight:bold; margin-bottom:10px;">AIが1〜100の中から数字を選びました。</div>
+        <div id="count">残り候補: 100個</div>
+        
+        <div class="grid" id="number-grid"></div>
+
+        <div class="input-area">
+            <input type="text" id="user-query" placeholder="例: ラッキーセブンに関係ある？" onkeypress="if(event.key==='Enter') askAI()">
+            <button id="send-btn" onclick="askAI()">質問する</button>
+        </div>
+
+        <div id="log"></div>
+        <button onclick="location.reload()" style="margin-top:20px; background:var(--accent); color:white;">新しいゲーム</button>
+    </div>
+</div>
+
+<script type="module">
+    import * as webllm from "https://esm.run/@mlc-ai/web-llm";
+
+    let targetNumber = Math.floor(Math.random() * 100) + 1;
+    let candidates = Array.from({length: 100}, (_, i) => i + 1);
+    let engine;
+
+    // AIモデルの指定（非常に軽量な Llama-3-8B の 4bit版を使用）
+    const selectedModel = "Llama-3-8B-Instruct-q4f16_1-MLC";
+
+    async function init() {
+        const statusMsg = document.getElementById("status-msg");
+        const progressFill = document.getElementById("progress-fill");
+
+        try {
+            engine = new webllm.MLCEngine();
+            engine.setInitProgressCallback((report) => {
+                // 進捗を表示
+                const progress = Math.floor(report.progress * 100);
+                progressFill.style.width = `${progress}%`;
+                statusMsg.innerText = `AIを読み込み中... ${progress}%`;
+            });
+
+            await engine.reload(selectedModel);
+            
+            document.getElementById("loader").style.display = "none";
+            document.getElementById("game-ui").style.display = "block";
+            renderGrid();
+        } catch (e) {
+            statusMsg.innerText = "エラー: お使いの端末ではこのAIは動かないようです。";
+            console.error(e);
+        }
+    }
+
+    // 質問処理
+    window.askAI = async () => {
+        const input = document.getElementById("user-query");
+        const btn = document.getElementById("send-btn");
+        const query = input.value.trim();
+        if (!query) return;
+
+        input.disabled = btn.disabled = true;
+        addLog(`探索中: "${query}"...`);
+
+        // AIへの命令（プロンプト）
+        const prompt = `あなたは数当てゲームの判定員です。
+        【正解の数字】: ${targetNumber}
+        【質問】: "${query}"
+        
+        手順:
+        1. 正解の数字「${targetNumber}」が、この質問に対して「はい」か「いいえ」か一言で判定してください。
+        2. その後、1から100の数字のうち、正解と同じ判定になる数字をすべて [ ] の中にカンマ区切りで書き出してください。
+        回答例: はい。 [2, 4, 6, 8, ...]`;
+
+        const messages = [{ role: "user", content: prompt }];
+        
+        const chunks = await engine.chat.completions.create({ messages });
+        const aiResponse = chunks.choices[0].message.content;
+
+        // AIの回答から数字のリストを抽出する
+        const match = aiResponse.match(/\[(.*?)\]/);
+        if (match) {
+            const validNumbers = match[1].split(',').map(n => parseInt(n.trim())).filter(n => !isNaN(n));
+            const isYes = aiResponse.includes("はい") || aiResponse.includes("YES");
+            
+            candidates = candidates.filter(n => validNumbers.includes(n));
+            addLog(`AIの回答: ${isYes ? "はい" : "いいえ"}`);
+        } else {
+            addLog(`AIがうまく判定できませんでした。もう一度聞いてみて！`);
+        }
+
+        input.value = "";
+        input.disabled = btn.disabled = false;
+        renderGrid();
+    };
+
+    function renderGrid() {
+        const grid = document.getElementById("number-grid");
+        grid.innerHTML = "";
+        for (let i = 1; i <= 100; i++) {
+            const div = document.createElement("div");
+            div.className = 'tile' + (candidates.includes(i) ? '' : ' excluded');
+            div.innerText = i;
+            grid.appendChild(div);
+        }
+        document.getElementById("count").innerText = `残り候補: ${candidates.length}個`;
+    }
+
+    function addLog(msg) {
+        const log = document.getElementById("log");
+        const div = document.createElement("div");
+        div.style.marginBottom = "5px";
+        div.innerText = msg;
+        log.prepend(div);
+    }
+
+    init();
+</script>
+</body>
+</html>
